@@ -19,6 +19,14 @@
 
 package org.elasticsearch.common.bytes;
 
+import com.google.common.base.Charsets;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.util.CharsetUtil;
+import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.common.io.stream.ByteBufferStreamInput;
+import org.elasticsearch.common.io.stream.StreamInput;
+
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
@@ -27,15 +35,6 @@ import java.nio.channels.GatheringByteChannel;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CoderResult;
-
-import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.common.io.stream.ByteBufferStreamInput;
-import org.elasticsearch.common.io.stream.StreamInput;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.buffer.ChannelBuffers;
-import org.jboss.netty.util.CharsetUtil;
-
-import com.google.common.base.Charsets;
 
 /**
  */
@@ -113,8 +112,8 @@ public class ByteBufferBytesReference implements BytesReference {
     }
 
     @Override
-    public ChannelBuffer toChannelBuffer() {
-        return ChannelBuffers.wrappedBuffer(buffer);
+    public ByteBuf toByteBuf() {
+        return Unpooled.wrappedBuffer(buffer);
     }
 
     @Override

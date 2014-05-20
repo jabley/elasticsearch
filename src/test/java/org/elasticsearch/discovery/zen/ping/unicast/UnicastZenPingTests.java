@@ -102,6 +102,7 @@ public class UnicastZenPingTests extends ElasticsearchTestCase {
         zenPingB.start();
 
         try {
+            // jabley: This isn't waiting for the response. WAT?
             ZenPing.PingResponse[] pingResponses = zenPingA.pingAndWait(TimeValue.timeValueSeconds(1));
             assertThat(pingResponses.length, equalTo(1));
             assertThat(pingResponses[0].target().id(), equalTo("UZP_B"));

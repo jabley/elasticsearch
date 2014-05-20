@@ -19,6 +19,10 @@
 
 package org.elasticsearch.transport.netty;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.SimpleChannelInboundHandler;
 import org.elasticsearch.ElasticsearchIllegalStateException;
 import org.elasticsearch.Version;
 import org.elasticsearch.common.component.Lifecycle;
@@ -32,8 +36,6 @@ import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.*;
 import org.elasticsearch.transport.support.TransportStatus;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.channel.*;
 
 import java.io.IOException;
 
@@ -41,7 +43,7 @@ import java.io.IOException;
  * A handler (must be the last one!) that does size based frame decoding and forwards the actual message
  * to the relevant action.
  */
-public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
+public class MessageChannelHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
     private final ESLogger logger;
     private final ThreadPool threadPool;
@@ -56,19 +58,7 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
     }
 
     @Override
-    public void writeComplete(ChannelHandlerContext ctx, WriteCompletionEvent e) throws Exception {
-        transportServiceAdapter.sent(e.getWrittenAmount());
-        super.writeComplete(ctx, e);
-    }
-
-    @Override
-    public void messageReceived(ChannelHandlerContext ctx, MessageEvent e) throws Exception {
-        Object m = e.getMessage();
-        if (!(m instanceof ChannelBuffer)) {
-            ctx.sendUpstream(e);
-            return;
-        }
-        ChannelBuffer buffer = (ChannelBuffer) m;
+    public void channelRead0(ChannelHandlerContext ctx, ByteBuf buffer) throws Exception {
         int size = buffer.getInt(buffer.readerIndex() - 4);
         transportServiceAdapter.received(size + 6);
 
@@ -80,14 +70,14 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
 
         // netty always copies a buffer, either in NioWorker in its read handler, where it copies to a fresh
         // buffer, or in the cumlation buffer, which is cleaned each time
-        StreamInput streamIn = ChannelBufferStreamInputFactory.create(buffer, size);
+        StreamInput streamIn = ByteBufStreamInputFactory.create(buffer, size);
 
         long requestId = buffer.readLong();
         byte status = buffer.readByte();
         Version version = Version.fromId(buffer.readInt());
 
         StreamInput wrappedStream;
-        if (TransportStatus.isCompress(status) && hasMessageBytesToRead && buffer.readable()) {
+        if (TransportStatus.isCompress(status) && hasMessageBytesToRead && buffer.isReadable()) {
             Compressor compressor = CompressorFactory.compressor(buffer);
             if (compressor == null) {
                 int maxToRead = Math.min(buffer.readableBytes(), 10);
@@ -106,7 +96,7 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
         wrappedStream.setVersion(version);
 
         if (TransportStatus.isRequest(status)) {
-            String action = handleRequest(ctx.getChannel(), wrappedStream, requestId, version);
+            String action = handleRequest(ctx.channel(), wrappedStream, requestId, version);
             if (buffer.readerIndex() != expectedIndexReader) {
                 if (buffer.readerIndex() < expectedIndexReader) {
                     logger.warn("Message not fully read (request) for [{}] and action [{}], resetting", requestId, action);
@@ -162,8 +152,7 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
 
     private void handlerResponseError(StreamInput buffer, final TransportResponseHandler handler) {
         Throwable error;
-        try {
-            ThrowableObjectInputStream ois = new ThrowableObjectInputStream(buffer, transport.settings().getClassLoader());
+        try (ThrowableObjectInputStream ois = new ThrowableObjectInputStream(buffer, transport.settings().getClassLoader())) {
             error = (Throwable) ois.readObject();
         } catch (Throwable e) {
             error = new TransportSerializationException("Failed to deserialize exception response from stream", e);
@@ -225,8 +214,9 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
     }
 
     @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, ExceptionEvent e) throws Exception {
-        transport.exceptionCaught(ctx, e);
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        transport.exceptionCaught(ctx, cause);
+        super.exceptionCaught(ctx, cause);
     }
 
     class ResponseHandler implements Runnable {

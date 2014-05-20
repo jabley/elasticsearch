@@ -19,17 +19,19 @@
 
 package org.elasticsearch.benchmark.transport.netty;
 
-import org.jboss.netty.bootstrap.ClientBootstrap;
-import org.jboss.netty.bootstrap.ServerBootstrap;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.buffer.ChannelBuffers;
-import org.jboss.netty.channel.*;
-import org.jboss.netty.channel.socket.nio.NioClientSocketChannelFactory;
-import org.jboss.netty.channel.socket.nio.NioServerSocketChannelFactory;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.bootstrap.ServerBootstrap;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
 
 import java.net.InetSocketAddress;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
 
 public class NettyEchoBenchmark {
 
@@ -38,54 +40,35 @@ public class NettyEchoBenchmark {
         int CYCLE_SIZE = 50000;
         final long NUMBER_OF_ITERATIONS = 500000;
 
-        ChannelBuffer message = ChannelBuffers.buffer(100);
+        ByteBuf message = Unpooled.buffer(100);
         for (int i = 0; i < message.capacity(); i++) {
             message.writeByte((byte) i);
         }
 
         // Configure the server.
-        ServerBootstrap serverBootstrap = new ServerBootstrap(
-                new NioServerSocketChannelFactory(
-                        Executors.newCachedThreadPool(),
-                        Executors.newCachedThreadPool()));
-
-        // Set up the pipeline factory.
-        serverBootstrap.setPipelineFactory(new ChannelPipelineFactory() {
-            @Override
-            public ChannelPipeline getPipeline() throws Exception {
-                return Channels.pipeline(new EchoServerHandler());
-            }
-        });
+        ServerBootstrap serverBootstrap = new ServerBootstrap()
+                        .channel(NioServerSocketChannel.class)
+                        .handler(new EchoServerHandler());
 
         // Bind and start to accept incoming connections.
         serverBootstrap.bind(new InetSocketAddress(9000));
 
-        ClientBootstrap clientBootstrap = new ClientBootstrap(
-                new NioClientSocketChannelFactory(
-                        Executors.newCachedThreadPool(),
-                        Executors.newCachedThreadPool()));
-
-//        ClientBootstrap clientBootstrap = new ClientBootstrap(
-//                new OioClientSocketChannelFactory(Executors.newCachedThreadPool()));
-
-        // Set up the pipeline factory.
         final EchoClientHandler clientHandler = new EchoClientHandler();
-        clientBootstrap.setPipelineFactory(new ChannelPipelineFactory() {
-            @Override
-            public ChannelPipeline getPipeline() throws Exception {
-                return Channels.pipeline(clientHandler);
-            }
-        });
+        
+        Bootstrap clientBootstrap = new Bootstrap()
+                        .channel(NioSocketChannel.class)
+//                        .channel(OioSocketChannel.class)
+                        .handler(clientHandler);
 
         // Start the connection attempt.
         ChannelFuture future = clientBootstrap.connect(new InetSocketAddress("localhost", 9000));
         future.awaitUninterruptibly();
-        Channel clientChannel = future.getChannel();
+        Channel clientChannel = future.channel();
 
         System.out.println("Warming up...");
         for (long i = 0; i < 10000; i++) {
             clientHandler.latch = new CountDownLatch(1);
-            clientChannel.write(message);
+            clientChannel.writeAndFlush(message);
             try {
                 clientHandler.latch.await();
             } catch (InterruptedException e) {
@@ -99,7 +82,7 @@ public class NettyEchoBenchmark {
         long cycleStart = System.currentTimeMillis();
         for (long i = 1; i < NUMBER_OF_ITERATIONS; i++) {
             clientHandler.latch = new CountDownLatch(1);
-            clientChannel.write(message);
+            clientChannel.writeAndFlush(message);
             try {
                 clientHandler.latch.await();
             } catch (InterruptedException e) {
@@ -116,11 +99,14 @@ public class NettyEchoBenchmark {
         System.out.println("Ran [" + NUMBER_OF_ITERATIONS + "] iterations, payload [" + payloadSize + "]: took [" + seconds + "], TPS: " + ((double) NUMBER_OF_ITERATIONS) / seconds);
 
         clientChannel.close().awaitUninterruptibly();
-        clientBootstrap.releaseExternalResources();
-        serverBootstrap.releaseExternalResources();
+        clientBootstrap.group().shutdownGracefully();
+        serverBootstrap.group().shutdownGracefully();
+        
+        clientBootstrap.group().terminationFuture().syncUninterruptibly();
+        serverBootstrap.group().terminationFuture().syncUninterruptibly();
     }
 
-    public static class EchoClientHandler extends SimpleChannelUpstreamHandler {
+    public static class EchoClientHandler extends ChannelInboundHandlerAdapter {
 
         public volatile CountDownLatch latch;
 
@@ -128,30 +114,33 @@ public class NettyEchoBenchmark {
         }
 
         @Override
-        public void messageReceived(ChannelHandlerContext ctx, MessageEvent e) {
+        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
             latch.countDown();
+            super.channelRead(ctx, msg);
         }
 
         @Override
-        public void exceptionCaught(ChannelHandlerContext ctx, ExceptionEvent e) {
-            e.getCause().printStackTrace();
-            e.getChannel().close();
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+            cause.printStackTrace();
+            ctx.channel().close();
+            super.exceptionCaught(ctx, cause);
         }
+
     }
 
 
-    public static class EchoServerHandler extends SimpleChannelUpstreamHandler {
+    public static class EchoServerHandler extends ChannelInboundHandlerAdapter {
 
         @Override
-        public void messageReceived(ChannelHandlerContext ctx, MessageEvent e) {
-            e.getChannel().write(e.getMessage());
+        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+            ctx.channel().writeAndFlush(msg);
+            super.channelRead(ctx, msg);
         }
 
         @Override
-        public void exceptionCaught(ChannelHandlerContext ctx, ExceptionEvent e) {
-            // Close the connection when an exception is raised.
-            e.getCause().printStackTrace();
-            e.getChannel().close();
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+            cause.printStackTrace();
+            ctx.channel().close();
         }
     }
 }

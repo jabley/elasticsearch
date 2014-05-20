@@ -20,8 +20,8 @@
 package org.elasticsearch.common.netty;
 
 import org.elasticsearch.common.lease.Releasable;
-import org.jboss.netty.channel.ChannelFuture;
-import org.jboss.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
 
 /**
  * A channel listener that releases a {@link org.elasticsearch.common.lease.Releasable} when

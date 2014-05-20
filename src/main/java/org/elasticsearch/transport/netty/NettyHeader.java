@@ -19,8 +19,8 @@
 
 package org.elasticsearch.transport.netty;
 
+import io.netty.buffer.ByteBuf;
 import org.elasticsearch.Version;
-import org.jboss.netty.buffer.ChannelBuffer;
 
 /**
  */
@@ -28,7 +28,7 @@ public class NettyHeader {
 
     public static final int HEADER_SIZE = 2 + 4 + 8 + 1 + 4;
 
-    public static void writeHeader(ChannelBuffer buffer, long requestId, byte status, Version version) {
+    public static void writeHeader(ByteBuf buffer, long requestId, byte status, Version version) {
         int index = buffer.readerIndex();
         buffer.setByte(index, 'E');
         index += 1;

@@ -19,12 +19,18 @@
 
 package org.elasticsearch.bulk.udp;
 
+import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.*;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.DatagramChannel;
+import io.netty.channel.socket.nio.NioDatagramChannel;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.action.bulk.BulkProcessor;
 import org.elasticsearch.action.bulk.BulkRequest;
 import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.client.Client;
-import org.elasticsearch.common.bytes.ChannelBufferBytesReference;
+import org.elasticsearch.common.bytes.ByteBufBytesReference;
 import org.elasticsearch.common.component.AbstractLifecycleComponent;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.network.NetworkService;
@@ -33,16 +39,11 @@ import org.elasticsearch.common.transport.PortsRange;
 import org.elasticsearch.common.unit.ByteSizeUnit;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.unit.TimeValue;
-import org.jboss.netty.bootstrap.ConnectionlessBootstrap;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.channel.*;
-import org.jboss.netty.channel.socket.nio.NioDatagramChannelFactory;
 
 import java.io.IOException;
 import java.net.BindException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.elasticsearch.common.util.concurrent.EsExecutors.daemonThreadFactory;
@@ -60,15 +61,15 @@ public class BulkUdpService extends AbstractLifecycleComponent<BulkUdpService> {
     final String port;
 
     final ByteSizeValue receiveBufferSize;
-    final ReceiveBufferSizePredictorFactory receiveBufferSizePredictorFactory;
+    final RecvByteBufAllocator receiveBufferSizeAllocator;
     final int bulkActions;
     final ByteSizeValue bulkSize;
     final TimeValue flushInterval;
     final int concurrentRequests;
 
     private BulkProcessor bulkProcessor;
-    private ConnectionlessBootstrap bootstrap;
-    private Channel channel;
+    private Bootstrap bootstrap;
+    private ChannelFuture channel;
 
     @Inject
     public BulkUdpService(Settings settings, Client client, NetworkService networkService) {
@@ -85,7 +86,7 @@ public class BulkUdpService extends AbstractLifecycleComponent<BulkUdpService> {
         this.concurrentRequests = componentSettings.getAsInt("concurrent_requests", 4);
 
         this.receiveBufferSize = componentSettings.getAsBytesSize("receive_buffer_size", new ByteSizeValue(10, ByteSizeUnit.MB));
-        this.receiveBufferSizePredictorFactory = new FixedReceiveBufferSizePredictorFactory(componentSettings.getAsBytesSize("receive_predictor_size", receiveBufferSize).bytesAsInt());
+        this.receiveBufferSizeAllocator = new FixedRecvByteBufAllocator(componentSettings.getAsBytesSize("receive_predictor_size", receiveBufferSize).bytesAsInt()); 
 
         this.enabled = componentSettings.getAsBoolean("enabled", false);
 
@@ -105,22 +106,19 @@ public class BulkUdpService extends AbstractLifecycleComponent<BulkUdpService> {
                 .setConcurrentRequests(concurrentRequests)
                 .build();
 
-
-        bootstrap = new ConnectionlessBootstrap(new NioDatagramChannelFactory(Executors.newCachedThreadPool(daemonThreadFactory(settings, "bulk_udp_worker"))));
-
-        bootstrap.setOption("receiveBufferSize", receiveBufferSize.bytesAsInt());
-        bootstrap.setOption("receiveBufferSizePredictorFactory", receiveBufferSizePredictorFactory);
-
-        // Enable broadcast
-        bootstrap.setOption("broadcast", "false");
-
-        bootstrap.setPipelineFactory(new ChannelPipelineFactory() {
-            @Override
-            public ChannelPipeline getPipeline() throws Exception {
-                return Channels.pipeline(new Handler());
-            }
-        });
-
+        EventLoopGroup workerGroup = new NioEventLoopGroup(0, daemonThreadFactory(settings, "bulk_udp_worker"));
+        
+        bootstrap = new Bootstrap();
+        bootstrap.group(workerGroup)
+                .channel(NioDatagramChannel.class)
+                .option(ChannelOption.RCVBUF_ALLOCATOR, receiveBufferSizeAllocator)
+                .option(ChannelOption.SO_BROADCAST, true)
+                .handler(new ChannelInitializer<DatagramChannel>() {
+                    @Override
+                    protected void initChannel(DatagramChannel ch) throws Exception {
+                        ch.pipeline().addLast(new Handler());
+                    }
+                });
 
         InetAddress hostAddressX;
         try {
@@ -137,7 +135,7 @@ public class BulkUdpService extends AbstractLifecycleComponent<BulkUdpService> {
             @Override
             public boolean onPortNumber(int portNumber) {
                 try {
-                    channel = bootstrap.bind(new InetSocketAddress(hostAddress, portNumber));
+                    channel = bootstrap.bind(new InetSocketAddress(hostAddress, portNumber)).sync();
                 } catch (Exception e) {
                     lastException.set(e);
                     return false;
@@ -150,7 +148,7 @@ public class BulkUdpService extends AbstractLifecycleComponent<BulkUdpService> {
             return;
         }
 
-        logger.info("address {}", channel.getLocalAddress());
+        logger.info("address {}", channel.channel().localAddress());
     }
 
     @Override
@@ -159,10 +157,11 @@ public class BulkUdpService extends AbstractLifecycleComponent<BulkUdpService> {
             return;
         }
         if (channel != null) {
-            channel.close().awaitUninterruptibly();
+            channel.channel().close().awaitUninterruptibly();
         }
         if (bootstrap != null) {
-            bootstrap.releaseExternalResources();
+            bootstrap.group().shutdownGracefully();
+            bootstrap = null;
         }
         bulkProcessor.close();
     }
@@ -171,26 +170,30 @@ public class BulkUdpService extends AbstractLifecycleComponent<BulkUdpService> {
     protected void doClose() throws ElasticsearchException {
     }
 
-    class Handler extends SimpleChannelUpstreamHandler {
+    class Handler extends ChannelInboundHandlerAdapter {
 
         @Override
-        public void messageReceived(ChannelHandlerContext ctx, MessageEvent e) throws Exception {
-            ChannelBuffer buffer = (ChannelBuffer) e.getMessage();
+        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+            ByteBuf buffer = (ByteBuf) msg;
             logger.trace("received message size [{}]", buffer.readableBytes());
             try {
-                bulkProcessor.add(new ChannelBufferBytesReference(buffer), false, null, null);
+                bulkProcessor.add(new ByteBufBytesReference(buffer), false, null, null);
             } catch (Exception e1) {
                 logger.warn("failed to execute bulk request", e1);
+            } finally {
+                buffer.release();
             }
         }
 
         @Override
-        public void exceptionCaught(ChannelHandlerContext ctx, ExceptionEvent e) throws Exception {
-            if (e.getCause() instanceof BindException) {
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+            if (cause instanceof BindException) {
                 // ignore, this happens when we retry binding to several ports, its fine if we fail...
                 return;
             }
-            logger.warn("failure caught", e.getCause());
+            logger.warn("failure caught", cause);
+
+            super.exceptionCaught(ctx, cause);
         }
     }
 

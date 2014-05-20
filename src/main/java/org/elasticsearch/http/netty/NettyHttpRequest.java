@@ -19,13 +19,14 @@
 
 package org.elasticsearch.http.netty;
 
+import io.netty.channel.Channel;
+import io.netty.handler.codec.http.HttpContent;
+import io.netty.handler.codec.http.HttpMethod;
+import org.elasticsearch.common.bytes.ByteBufBytesReference;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.bytes.ChannelBufferBytesReference;
 import org.elasticsearch.http.HttpRequest;
 import org.elasticsearch.rest.support.RestUtils;
-import org.jboss.netty.channel.Channel;
-import org.jboss.netty.handler.codec.http.HttpMethod;
 
 import java.net.SocketAddress;
 import java.util.HashMap;
@@ -36,18 +37,20 @@ import java.util.Map;
  */
 public class NettyHttpRequest extends HttpRequest {
 
-    private final org.jboss.netty.handler.codec.http.HttpRequest request;
+    private final io.netty.handler.codec.http.HttpRequest request;
     private final Channel channel;
     private final Map<String, String> params;
     private final String rawPath;
     private final BytesReference content;
 
-    public NettyHttpRequest(org.jboss.netty.handler.codec.http.HttpRequest request, Channel channel) {
+    public NettyHttpRequest(io.netty.handler.codec.http.HttpRequest request, Channel channel) {
         this.request = request;
         this.channel = channel;
         this.params = new HashMap<>();
-        if (request.getContent().readable()) {
-            this.content = new ChannelBufferBytesReference(request.getContent());
+        
+        // We have an HttpObjectAggregator earlier in the pipeline, so we should have a single HttpContent
+        if ((request instanceof HttpContent) && ((HttpContent) request).content().isReadable()) {
+            this.content = new ByteBufBytesReference(((HttpContent) request).content());
         } else {
             this.content = BytesArray.EMPTY;
         }
@@ -62,7 +65,7 @@ public class NettyHttpRequest extends HttpRequest {
         }
     }
 
-    public org.jboss.netty.handler.codec.http.HttpRequest request() {
+    public io.netty.handler.codec.http.HttpRequest request() {
         return this.request;
     }
 
@@ -131,7 +134,7 @@ public class NettyHttpRequest extends HttpRequest {
      */
     @Override
     public SocketAddress getRemoteAddress() {
-        return channel.getRemoteAddress();
+        return channel.remoteAddress();
     }
 
     /**
@@ -142,7 +145,7 @@ public class NettyHttpRequest extends HttpRequest {
      */
     @Override
     public SocketAddress getLocalAddress() {
-        return channel.getLocalAddress();
+        return channel.localAddress();
     }
 
     @Override

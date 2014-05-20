@@ -21,6 +21,17 @@ package org.elasticsearch.transport.netty;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.bootstrap.ServerBootstrap;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.*;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.oio.OioEventLoopGroup;
+import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.channel.socket.oio.OioServerSocketChannel;
+import io.netty.channel.socket.oio.OioSocketChannel;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.ElasticsearchIllegalArgumentException;
 import org.elasticsearch.ElasticsearchIllegalStateException;
@@ -55,17 +66,6 @@ import org.elasticsearch.monitor.jvm.JvmInfo;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.*;
 import org.elasticsearch.transport.support.TransportStatus;
-import org.jboss.netty.bootstrap.ClientBootstrap;
-import org.jboss.netty.bootstrap.ServerBootstrap;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.buffer.CompositeChannelBuffer;
-import org.jboss.netty.channel.*;
-import org.jboss.netty.channel.socket.nio.NioClientSocketChannelFactory;
-import org.jboss.netty.channel.socket.nio.NioServerSocketChannelFactory;
-import org.jboss.netty.channel.socket.nio.NioWorkerPool;
-import org.jboss.netty.channel.socket.oio.OioClientSocketChannelFactory;
-import org.jboss.netty.channel.socket.oio.OioServerSocketChannelFactory;
-import org.jboss.netty.util.HashedWheelTimer;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -78,7 +78,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -133,7 +132,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
 
     final ByteSizeValue tcpSendBufferSize;
     final ByteSizeValue tcpReceiveBufferSize;
-    final ReceiveBufferSizePredictorFactory receiveBufferSizePredictorFactory;
+    final RecvByteBufAllocator receiveBufferSizeAllocator;
 
     final int connectionsPerNodeRecovery;
     final int connectionsPerNodeBulk;
@@ -150,7 +149,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
 
     private volatile OpenChannelsHandler serverOpenChannels;
 
-    private volatile ClientBootstrap clientBootstrap;
+    private volatile Bootstrap clientBootstrap;
 
     private volatile ServerBootstrap serverBootstrap;
 
@@ -158,7 +157,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
     final ConcurrentMap<DiscoveryNode, NodeChannels> connectedNodes = newConcurrentMap();
 
 
-    private volatile Channel serverChannel;
+    private volatile ChannelFuture serverChannel;
 
     private volatile TransportServiceAdapter transportServiceAdapter;
 
@@ -177,10 +176,6 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
         this.networkService = networkService;
         this.bigArrays = bigArrays;
         this.version = version;
-
-        if (settings.getAsBoolean("netty.epollBugWorkaround", false)) {
-            System.setProperty("org.jboss.netty.epollBugWorkaround", "true");
-        }
 
         this.workerCount = componentSettings.getAsInt("worker_count", EsExecutors.boundedNumberOfProcessors(settings) * 2);
         this.bossCount = componentSettings.getAsInt("boss_count", 1);
@@ -228,9 +223,9 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
         ByteSizeValue receivePredictorMin = componentSettings.getAsBytesSize("receive_predictor_min", componentSettings.getAsBytesSize("receive_predictor_size", new ByteSizeValue(defaultReceiverPredictor)));
         ByteSizeValue receivePredictorMax = componentSettings.getAsBytesSize("receive_predictor_max", componentSettings.getAsBytesSize("receive_predictor_size", new ByteSizeValue(defaultReceiverPredictor)));
         if (receivePredictorMax.bytes() == receivePredictorMin.bytes()) {
-            receiveBufferSizePredictorFactory = new FixedReceiveBufferSizePredictorFactory((int) receivePredictorMax.bytes());
+            receiveBufferSizeAllocator = new FixedRecvByteBufAllocator(receivePredictorMax.bytesAsInt());
         } else {
-            receiveBufferSizePredictorFactory = new AdaptiveReceiveBufferSizePredictorFactory((int) receivePredictorMin.bytes(), (int) receivePredictorMin.bytes(), (int) receivePredictorMax.bytes());
+            receiveBufferSizeAllocator = new AdaptiveRecvByteBufAllocator(receivePredictorMin.bytesAsInt(), receivePredictorMin.bytesAsInt(), receivePredictorMax.bytesAsInt());
         }
 
         logger.debug("using worker_count[{}], port[{}], bind_host[{}], publish_host[{}], compress[{}], connect_timeout[{}], connections_per_node[{}/{}/{}/{}/{}], receive_predictor[{}->{}]",
@@ -257,51 +252,41 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
     @Override
     protected void doStart() throws ElasticsearchException {
         if (blockingClient) {
-            clientBootstrap = new ClientBootstrap(new OioClientSocketChannelFactory(Executors.newCachedThreadPool(daemonThreadFactory(settings, "transport_client_worker"))));
+            clientBootstrap = new Bootstrap()
+                                .channel(OioSocketChannel.class)
+                                .group(new OioEventLoopGroup(0, daemonThreadFactory(settings, "transport_client_worker")));
         } else {
-            clientBootstrap = new ClientBootstrap(new NioClientSocketChannelFactory(
-                    Executors.newCachedThreadPool(daemonThreadFactory(settings, "transport_client_boss")),
-                    bossCount,
-                    new NioWorkerPool(Executors.newCachedThreadPool(daemonThreadFactory(settings, "transport_client_worker")), workerCount),
-                    new HashedWheelTimer(daemonThreadFactory(settings, "transport_client_timer"))));
+            clientBootstrap = new Bootstrap()
+                                .channel(NioSocketChannel.class)
+                                .group(new NioEventLoopGroup(workerCount, daemonThreadFactory(settings, "transport_client_worker")));
         }
-        ChannelPipelineFactory clientPipelineFactory = new ChannelPipelineFactory() {
+
+        clientBootstrap.handler(new ChannelInitializer<Channel>() {
+
             @Override
-            public ChannelPipeline getPipeline() throws Exception {
-                ChannelPipeline pipeline = Channels.pipeline();
-                SizeHeaderFrameDecoder sizeHeader = new SizeHeaderFrameDecoder();
-                if (maxCumulationBufferCapacity != null) {
-                    if (maxCumulationBufferCapacity.bytes() > Integer.MAX_VALUE) {
-                        sizeHeader.setMaxCumulationBufferCapacity(Integer.MAX_VALUE);
-                    } else {
-                        sizeHeader.setMaxCumulationBufferCapacity((int) maxCumulationBufferCapacity.bytes());
-                    }
-                }
-                if (maxCompositeBufferComponents != -1) {
-                    sizeHeader.setMaxCumulationBufferComponents(maxCompositeBufferComponents);
-                }
-                pipeline.addLast("size", sizeHeader);
+            protected void initChannel(Channel channel) throws Exception {
+                ChannelPipeline pipeline = channel.pipeline();
+                pipeline.addLast("size", new SizeHeaderFrameDecoder());
                 pipeline.addLast("dispatcher", new MessageChannelHandler(NettyTransport.this, logger));
-                return pipeline;
             }
-        };
-        clientBootstrap.setPipelineFactory(clientPipelineFactory);
-        clientBootstrap.setOption("connectTimeoutMillis", connectTimeout.millis());
+        });
+
+        clientBootstrap.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, (int) connectTimeout.millis());
         if (tcpNoDelay != null) {
-            clientBootstrap.setOption("tcpNoDelay", tcpNoDelay);
+            clientBootstrap.option(ChannelOption.TCP_NODELAY, tcpNoDelay);
         }
         if (tcpKeepAlive != null) {
-            clientBootstrap.setOption("keepAlive", tcpKeepAlive);
+            clientBootstrap.option(ChannelOption.SO_KEEPALIVE, tcpKeepAlive);
         }
         if (tcpSendBufferSize != null && tcpSendBufferSize.bytes() > 0) {
-            clientBootstrap.setOption("sendBufferSize", tcpSendBufferSize.bytes());
+            clientBootstrap.option(ChannelOption.SO_SNDBUF, tcpSendBufferSize.bytesAsInt());
         }
         if (tcpReceiveBufferSize != null && tcpReceiveBufferSize.bytes() > 0) {
-            clientBootstrap.setOption("receiveBufferSize", tcpReceiveBufferSize.bytes());
+            clientBootstrap.option(ChannelOption.SO_RCVBUF, tcpReceiveBufferSize.bytesAsInt());
         }
-        clientBootstrap.setOption("receiveBufferSizePredictorFactory", receiveBufferSizePredictorFactory);
+        clientBootstrap.option(ChannelOption.RCVBUF_ALLOCATOR, receiveBufferSizeAllocator);
         if (reuseAddress != null) {
-            clientBootstrap.setOption("reuseAddress", reuseAddress);
+            clientBootstrap.option(ChannelOption.SO_REUSEADDR, reuseAddress);
         }
 
         if (!settings.getAsBoolean("network.server", true)) {
@@ -310,56 +295,47 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
 
         final OpenChannelsHandler openChannels = new OpenChannelsHandler(logger);
         this.serverOpenChannels = openChannels;
+
         if (blockingServer) {
-            serverBootstrap = new ServerBootstrap(new OioServerSocketChannelFactory(
-                    Executors.newCachedThreadPool(daemonThreadFactory(settings, "transport_server_boss")),
-                    Executors.newCachedThreadPool(daemonThreadFactory(settings, "transport_server_worker"))
-            ));
+            serverBootstrap = new ServerBootstrap()
+                                .channel(OioServerSocketChannel.class)
+                                .group(new OioEventLoopGroup(0, daemonThreadFactory(settings, "transport_server_boss")),
+                                        new OioEventLoopGroup(0, daemonThreadFactory(settings, "transport_server_worker")));
         } else {
-            serverBootstrap = new ServerBootstrap(new NioServerSocketChannelFactory(
-                    Executors.newCachedThreadPool(daemonThreadFactory(settings, "transport_server_boss")),
-                    Executors.newCachedThreadPool(daemonThreadFactory(settings, "transport_server_worker")),
-                    workerCount));
+            serverBootstrap = new ServerBootstrap()
+                                .channel(NioServerSocketChannel.class)
+                                .group(new NioEventLoopGroup(0, daemonThreadFactory(settings, "transport_server_boss")),
+                                        new NioEventLoopGroup(workerCount, daemonThreadFactory(settings, "transport_server_worker")));
         }
-        ChannelPipelineFactory serverPipelineFactory = new ChannelPipelineFactory() {
+
+        serverBootstrap.childHandler(new ChannelInitializer<Channel>() {
+
             @Override
-            public ChannelPipeline getPipeline() throws Exception {
-                ChannelPipeline pipeline = Channels.pipeline();
+            protected void initChannel(Channel channel) throws Exception {
+                ChannelPipeline pipeline = channel.pipeline();
                 pipeline.addLast("openChannels", openChannels);
-                SizeHeaderFrameDecoder sizeHeader = new SizeHeaderFrameDecoder();
-                if (maxCumulationBufferCapacity != null) {
-                    if (maxCumulationBufferCapacity.bytes() > Integer.MAX_VALUE) {
-                        sizeHeader.setMaxCumulationBufferCapacity(Integer.MAX_VALUE);
-                    } else {
-                        sizeHeader.setMaxCumulationBufferCapacity((int) maxCumulationBufferCapacity.bytes());
-                    }
-                }
-                if (maxCompositeBufferComponents != -1) {
-                    sizeHeader.setMaxCumulationBufferComponents(maxCompositeBufferComponents);
-                }
-                pipeline.addLast("size", sizeHeader);
+                pipeline.addLast("size", new SizeHeaderFrameDecoder());
                 pipeline.addLast("dispatcher", new MessageChannelHandler(NettyTransport.this, logger));
-                return pipeline;
             }
-        };
-        serverBootstrap.setPipelineFactory(serverPipelineFactory);
+        });
+
         if (tcpNoDelay != null) {
-            serverBootstrap.setOption("child.tcpNoDelay", tcpNoDelay);
+            serverBootstrap.childOption(ChannelOption.TCP_NODELAY, tcpNoDelay);
         }
         if (tcpKeepAlive != null) {
-            serverBootstrap.setOption("child.keepAlive", tcpKeepAlive);
+            serverBootstrap.childOption(ChannelOption.SO_KEEPALIVE, tcpKeepAlive);
         }
         if (tcpSendBufferSize != null && tcpSendBufferSize.bytes() > 0) {
-            serverBootstrap.setOption("child.sendBufferSize", tcpSendBufferSize.bytes());
+            serverBootstrap.childOption(ChannelOption.SO_SNDBUF, tcpSendBufferSize.bytesAsInt());
         }
         if (tcpReceiveBufferSize != null && tcpReceiveBufferSize.bytes() > 0) {
-            serverBootstrap.setOption("child.receiveBufferSize", tcpReceiveBufferSize.bytes());
+            serverBootstrap.childOption(ChannelOption.SO_RCVBUF, tcpReceiveBufferSize.bytesAsInt());
         }
-        serverBootstrap.setOption("receiveBufferSizePredictorFactory", receiveBufferSizePredictorFactory);
-        serverBootstrap.setOption("child.receiveBufferSizePredictorFactory", receiveBufferSizePredictorFactory);
+        serverBootstrap.option(ChannelOption.RCVBUF_ALLOCATOR, receiveBufferSizeAllocator);
+        serverBootstrap.childOption(ChannelOption.RCVBUF_ALLOCATOR, receiveBufferSizeAllocator);
         if (reuseAddress != null) {
-            serverBootstrap.setOption("reuseAddress", reuseAddress);
-            serverBootstrap.setOption("child.reuseAddress", reuseAddress);
+            serverBootstrap.option(ChannelOption.SO_REUSEADDR, reuseAddress);
+            serverBootstrap.childOption(ChannelOption.SO_REUSEADDR, reuseAddress);
         }
 
         // Bind and start to accept incoming connections.
@@ -377,7 +353,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
             @Override
             public boolean onPortNumber(int portNumber) {
                 try {
-                    serverChannel = serverBootstrap.bind(new InetSocketAddress(hostAddress, portNumber));
+                    serverChannel = serverBootstrap.bind(new InetSocketAddress(hostAddress, portNumber)).sync();
                 } catch (Exception e) {
                     lastException.set(e);
                     return false;
@@ -389,9 +365,9 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
             throw new BindTransportException("Failed to bind to [" + port + "]", lastException.get());
         }
 
-        logger.debug("Bound to address [{}]", serverChannel.getLocalAddress());
+        logger.debug("Bound to address [{}]", serverChannel.channel().localAddress());
 
-        InetSocketAddress boundAddress = (InetSocketAddress) serverChannel.getLocalAddress();
+        InetSocketAddress boundAddress = (InetSocketAddress) serverChannel.channel().localAddress();
         InetSocketAddress publishAddress;
         int publishPort = this.publishPort;
         if (0 == publishPort) {
@@ -422,7 +398,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
 
                     if (serverChannel != null) {
                         try {
-                            serverChannel.close().awaitUninterruptibly();
+                            serverChannel.channel().close().awaitUninterruptibly();
                         } finally {
                             serverChannel = null;
                         }
@@ -434,7 +410,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
                     }
 
                     if (serverBootstrap != null) {
-                        serverBootstrap.releaseExternalResources();
+                        serverBootstrap.group().shutdownGracefully();
                         serverBootstrap = null;
                     }
 
@@ -445,7 +421,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
                     }
 
                     if (clientBootstrap != null) {
-                        clientBootstrap.releaseExternalResources();
+                        clientBootstrap.group().shutdownGracefully();
                         clientBootstrap = null;
                     }
                 } finally {
@@ -507,30 +483,30 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
         return this.boundAddress;
     }
 
-    void exceptionCaught(ChannelHandlerContext ctx, ExceptionEvent e) throws Exception {
+    void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
         if (!lifecycle.started()) {
             // ignore
         }
-        if (isCloseConnectionException(e.getCause())) {
-            logger.trace("close connection exception caught on transport layer [{}], disconnecting from relevant node", e.getCause(), ctx.getChannel());
+        if (isCloseConnectionException(cause)) {
+            logger.trace("close connection exception caught on transport layer [{}], disconnecting from relevant node", cause, ctx.channel());
             // close the channel, which will cause a node to be disconnected if relevant
-            ctx.getChannel().close();
-            disconnectFromNodeChannel(ctx.getChannel(), e.getCause());
-        } else if (isConnectException(e.getCause())) {
-            logger.trace("connect exception caught on transport layer [{}]", e.getCause(), ctx.getChannel());
+            ctx.channel().close();
+            disconnectFromNodeChannel(ctx.channel(), cause);
+        } else if (isConnectException(cause)) {
+            logger.trace("connect exception caught on transport layer [{}]", cause, ctx.channel());
             // close the channel as safe measure, which will cause a node to be disconnected if relevant
-            ctx.getChannel().close();
-            disconnectFromNodeChannel(ctx.getChannel(), e.getCause());
-        } else if (e.getCause() instanceof CancelledKeyException) {
-            logger.trace("cancelled key exception caught on transport layer [{}], disconnecting from relevant node", e.getCause(), ctx.getChannel());
+            ctx.channel().close();
+            disconnectFromNodeChannel(ctx.channel(), cause);
+        } else if (cause instanceof CancelledKeyException) {
+            logger.trace("cancelled key exception caught on transport layer [{}], disconnecting from relevant node", cause, ctx.channel());
             // close the channel as safe measure, which will cause a node to be disconnected if relevant
-            ctx.getChannel().close();
-            disconnectFromNodeChannel(ctx.getChannel(), e.getCause());
+            ctx.channel().close();
+            disconnectFromNodeChannel(ctx.channel(), cause);
         } else {
-            logger.warn("exception caught on transport layer [{}], closing connection", e.getCause(), ctx.getChannel());
+            logger.warn("exception caught on transport layer [{}], closing connection", cause, ctx.channel());
             // close the channel, which will cause a node to be disconnected if relevant
-            ctx.getChannel().close();
-            disconnectFromNodeChannel(ctx.getChannel(), e.getCause());
+            ctx.channel().close();
+            disconnectFromNodeChannel(ctx.channel(), cause);
         }
     }
 
@@ -577,7 +553,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
             stream.writeString(action);
 
             ReleasableBytesReference bytes;
-            ChannelBuffer buffer;
+            ByteBuf buffer;
             // it might be nice to somehow generalize this optimization, maybe a smart "paged" bytes output
             // that create paged channel buffers, but its tricky to know when to do it (where this option is
             // more explicit).
@@ -587,18 +563,18 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
                 bRequest.writeThin(stream);
                 stream.close();
                 bytes = bStream.bytes();
-                ChannelBuffer headerBuffer = bytes.toChannelBuffer();
-                ChannelBuffer contentBuffer = bRequest.bytes().toChannelBuffer();
+                ByteBuf headerBuffer = bytes.toByteBuf();
+                ByteBuf contentBuffer = bRequest.bytes().toByteBuf();
                 // false on gathering, cause gathering causes the NIO layer to combine the buffers into a single direct buffer....
-                buffer = new CompositeChannelBuffer(headerBuffer.order(), ImmutableList.<ChannelBuffer>of(headerBuffer, contentBuffer), false);
+                buffer = Unpooled.compositeBuffer().addComponents(ImmutableList.<ByteBuf>of(headerBuffer, contentBuffer)).order(headerBuffer.order());
             } else {
                 request.writeTo(stream);
                 stream.close();
                 bytes = bStream.bytes();
-                buffer = bytes.toChannelBuffer();
+                buffer = bytes.toByteBuf();
             }
             NettyHeader.writeHeader(buffer, requestId, status, version);
-            ChannelFuture future = targetChannel.write(buffer);
+            ChannelFuture future = targetChannel.writeAndFlush(buffer);
             ReleaseChannelFutureListener listener = new ReleaseChannelFutureListener(bytes);
             future.addListener(listener);
             addedReleaseListener = true;
@@ -689,11 +665,11 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
         ChannelFuture connect = clientBootstrap.connect(address);
         connect.awaitUninterruptibly((long) (connectTimeout.millis() * 1.5));
         if (!connect.isSuccess()) {
-            throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connect.getCause());
+            throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connect.cause());
         }
         Channel[] channels = new Channel[1];
-        channels[0] = connect.getChannel();
-        channels[0].getCloseFuture().addListener(new ChannelCloseListener(node));
+        channels[0] = connect.channel();
+        channels[0].closeFuture().addListener(new ChannelCloseListener(node));
         return new NodeChannels(channels, channels, channels, channels, channels);
     }
 
@@ -724,46 +700,46 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
             for (int i = 0; i < connectRecovery.length; i++) {
                 connectRecovery[i].awaitUninterruptibly((long) (connectTimeout.millis() * 1.5));
                 if (!connectRecovery[i].isSuccess()) {
-                    throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connectRecovery[i].getCause());
+                    throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connectRecovery[i].cause());
                 }
-                nodeChannels.recovery[i] = connectRecovery[i].getChannel();
-                nodeChannels.recovery[i].getCloseFuture().addListener(new ChannelCloseListener(node));
+                nodeChannels.recovery[i] = connectRecovery[i].channel();
+                nodeChannels.recovery[i].closeFuture().addListener(new ChannelCloseListener(node));
             }
 
             for (int i = 0; i < connectBulk.length; i++) {
                 connectBulk[i].awaitUninterruptibly((long) (connectTimeout.millis() * 1.5));
                 if (!connectBulk[i].isSuccess()) {
-                    throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connectBulk[i].getCause());
+                    throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connectBulk[i].cause());
                 }
-                nodeChannels.bulk[i] = connectBulk[i].getChannel();
-                nodeChannels.bulk[i].getCloseFuture().addListener(new ChannelCloseListener(node));
+                nodeChannels.bulk[i] = connectBulk[i].channel();
+                nodeChannels.bulk[i].closeFuture().addListener(new ChannelCloseListener(node));
             }
 
             for (int i = 0; i < connectReg.length; i++) {
                 connectReg[i].awaitUninterruptibly((long) (connectTimeout.millis() * 1.5));
                 if (!connectReg[i].isSuccess()) {
-                    throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connectReg[i].getCause());
+                    throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connectReg[i].cause());
                 }
-                nodeChannels.reg[i] = connectReg[i].getChannel();
-                nodeChannels.reg[i].getCloseFuture().addListener(new ChannelCloseListener(node));
+                nodeChannels.reg[i] = connectReg[i].channel();
+                nodeChannels.reg[i].closeFuture().addListener(new ChannelCloseListener(node));
             }
 
             for (int i = 0; i < connectState.length; i++) {
                 connectState[i].awaitUninterruptibly((long) (connectTimeout.millis() * 1.5));
                 if (!connectState[i].isSuccess()) {
-                    throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connectState[i].getCause());
+                    throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connectState[i].cause());
                 }
-                nodeChannels.state[i] = connectState[i].getChannel();
-                nodeChannels.state[i].getCloseFuture().addListener(new ChannelCloseListener(node));
+                nodeChannels.state[i] = connectState[i].channel();
+                nodeChannels.state[i].closeFuture().addListener(new ChannelCloseListener(node));
             }
 
             for (int i = 0; i < connectPing.length; i++) {
                 connectPing[i].awaitUninterruptibly((long) (connectTimeout.millis() * 1.5));
                 if (!connectPing[i].isSuccess()) {
-                    throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connectPing[i].getCause());
+                    throw new ConnectTransportException(node, "connect_timeout[" + connectTimeout + "]", connectPing[i].cause());
                 }
-                nodeChannels.ping[i] = connectPing[i].getChannel();
-                nodeChannels.ping[i].getCloseFuture().addListener(new ChannelCloseListener(node));
+                nodeChannels.ping[i] = connectPing[i].channel();
+                nodeChannels.ping[i].closeFuture().addListener(new ChannelCloseListener(node));
             }
 
             if (nodeChannels.recovery.length == 0) {
@@ -779,10 +755,10 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
         } catch (RuntimeException e) {
             // clean the futures
             for (ChannelFuture future : ImmutableList.<ChannelFuture>builder().add(connectRecovery).add(connectBulk).add(connectReg).add(connectState).add(connectPing).build()) {
-                future.cancel();
-                if (future.getChannel() != null && future.getChannel().isOpen()) {
+                future.cancel(true);
+                if (future.channel() != null && future.channel().isOpen()) {
                     try {
-                        future.getChannel().close();
+                        future.channel().close();
                     } catch (Exception e1) {
                         // ignore
                     }
@@ -880,7 +856,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
 
         @Override
         public void operationComplete(ChannelFuture future) throws Exception {
-            disconnectFromNode(node, future.getChannel(), "channel closed event");
+            disconnectFromNode(node, future.channel(), "channel closed event");
         }
     }
 

@@ -311,12 +311,13 @@ public class MulticastZenPing extends AbstractLifecycleComponent<ZenPing> implem
                     }
                 }
                 if (internal) {
-                    StreamInput input = CachedStreamInput.cachedHandles(new BytesStreamInput(new BytesArray(data.toBytes(), INTERNAL_HEADER.length, data.length() - INTERNAL_HEADER.length)));
-                    Version version = Version.readVersion(input);
-                    input.setVersion(version);
-                    id = input.readInt();
-                    clusterName = ClusterName.readClusterName(input);
-                    requestingNodeX = readNode(input);
+                    try (StreamInput input = CachedStreamInput.cachedHandles(new BytesStreamInput(new BytesArray(data.toBytes(), INTERNAL_HEADER.length, data.length() - INTERNAL_HEADER.length)))) {
+                        Version version = Version.readVersion(input);
+                        input.setVersion(version);
+                        id = input.readInt();
+                        clusterName = ClusterName.readClusterName(input);
+                        requestingNodeX = readNode(input);
+                    }
                 } else {
                     xContentType = XContentFactory.xContentType(data);
                     if (xContentType != null) {

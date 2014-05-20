@@ -23,6 +23,7 @@ import com.ning.compress.lzf.ChunkDecoder;
 import com.ning.compress.lzf.LZFChunk;
 import com.ning.compress.lzf.LZFEncoder;
 import com.ning.compress.lzf.util.ChunkDecoderFactory;
+import io.netty.buffer.ByteBuf;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.Constants;
 import org.elasticsearch.common.bytes.BytesReference;
@@ -34,7 +35,6 @@ import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.Settings;
-import org.jboss.netty.buffer.ChannelBuffer;
 
 import java.io.IOException;
 
@@ -95,7 +95,7 @@ public class LZFCompressor implements Compressor {
     }
 
     @Override
-    public boolean isCompressed(ChannelBuffer buffer) {
+    public boolean isCompressed(ByteBuf buffer) {
         int offset = buffer.readerIndex();
         return buffer.readableBytes() >= 3 &&
                 buffer.getByte(offset) == LZFChunk.BYTE_Z &&
