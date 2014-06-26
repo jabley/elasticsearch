@@ -245,8 +245,8 @@
 
         <dependency>
             <groupId>io.netty</groupId>
-            <artifactId>netty</artifactId>
-            <version>3.9.1.Final</version>
+            <artifactId>netty-all</artifactId>
+            <version>4.0.20.Final</version>
             <scope>compile</scope>
         </dependency>
 
@@ -691,7 +691,7 @@
                             <shadedPattern>org.elasticsearch.common.joda</shadedPattern>
                         </relocation>
                         <relocation>
-                            <pattern>org.jboss.netty</pattern>
+                            <pattern>io.netty</pattern>
                             <shadedPattern>org.elasticsearch.common.netty</shadedPattern>
                         </relocation>
                         <relocation>

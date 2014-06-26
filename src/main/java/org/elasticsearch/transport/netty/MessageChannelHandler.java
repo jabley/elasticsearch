@@ -19,6 +19,8 @@
 
 package org.elasticsearch.transport.netty;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.*;
 import org.elasticsearch.ElasticsearchIllegalStateException;
 import org.elasticsearch.Version;
 import org.elasticsearch.common.component.Lifecycle;
@@ -33,8 +35,6 @@ import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.*;
 import org.elasticsearch.transport.support.TransportStatus;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.channel.*;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -43,7 +43,7 @@ import java.net.InetSocketAddress;
  * A handler (must be the last one!) that does size based frame decoding and forwards the actual message
  * to the relevant action.
  */
-public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
+public class MessageChannelHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
     protected final ESLogger logger;
     protected final ThreadPool threadPool;
@@ -58,20 +58,8 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
     }
 
     @Override
-    public void writeComplete(ChannelHandlerContext ctx, WriteCompletionEvent e) throws Exception {
-        transportServiceAdapter.sent(e.getWrittenAmount());
-        super.writeComplete(ctx, e);
-    }
-
-    @Override
-    public void messageReceived(ChannelHandlerContext ctx, MessageEvent e) throws Exception {
-        Object m = e.getMessage();
-        if (!(m instanceof ChannelBuffer)) {
-            ctx.sendUpstream(e);
-            return;
-        }
-        ChannelBuffer buffer = (ChannelBuffer) m;
-        int size = buffer.getInt(buffer.readerIndex() - 4);
+    public void channelRead0(ChannelHandlerContext ctx, ByteBuf buffer) throws Exception {
+        int size = buffer.readInt();
         transportServiceAdapter.received(size + 6);
 
         // we have additional bytes to read, outside of the header
@@ -81,7 +69,7 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
         int expectedIndexReader = markedReaderIndex + size;
 
         // netty always copies a buffer, either in NioWorker in its read handler, where it copies to a fresh
-        // buffer, or in the cumlation buffer, which is cleaned each time
+        // buffer, or in the cumulation buffer, which is cleaned each time
         StreamInput streamIn = ChannelBufferStreamInputFactory.create(buffer, size);
 
         long requestId = buffer.readLong();
@@ -89,7 +77,7 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
         Version version = Version.fromId(buffer.readInt());
 
         StreamInput wrappedStream;
-        if (TransportStatus.isCompress(status) && hasMessageBytesToRead && buffer.readable()) {
+        if (TransportStatus.isCompress(status) && hasMessageBytesToRead && buffer.isReadable()) {
             Compressor compressor = CompressorFactory.compressor(buffer);
             if (compressor == null) {
                 int maxToRead = Math.min(buffer.readableBytes(), 10);
@@ -108,7 +96,7 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
         wrappedStream.setVersion(version);
 
         if (TransportStatus.isRequest(status)) {
-            String action = handleRequest(ctx.getChannel(), wrappedStream, requestId, version);
+            String action = handleRequest(ctx.channel(), wrappedStream, requestId, version);
             if (buffer.readerIndex() != expectedIndexReader) {
                 if (buffer.readerIndex() < expectedIndexReader) {
                     logger.warn("Message not fully read (request) for [{}] and action [{}], resetting", requestId, action);
@@ -124,7 +112,7 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
                 if (TransportStatus.isError(status)) {
                     handlerResponseError(wrappedStream, handler);
                 } else {
-                    handleResponse(ctx.getChannel(), wrappedStream, handler);
+                    handleResponse(ctx.channel(), wrappedStream, handler);
                 }
             } else {
                 // if its null, skip those bytes
@@ -144,7 +132,7 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
 
     protected void handleResponse(Channel channel, StreamInput buffer, final TransportResponseHandler handler) {
         final TransportResponse response = handler.newInstance();
-        response.remoteAddress(new InetSocketTransportAddress((InetSocketAddress) channel.getRemoteAddress()));
+        response.remoteAddress(new InetSocketTransportAddress((InetSocketAddress) channel.remoteAddress()));
         response.remoteAddress();
         try {
             response.readFrom(buffer);
@@ -203,14 +191,32 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
     protected String handleRequest(Channel channel, StreamInput buffer, long requestId, Version version) throws IOException {
         final String action = buffer.readString();
 
-        final NettyTransportChannel transportChannel = new NettyTransportChannel(transport, action, channel, requestId, version);
+        ChannelProgressivePromise progressPromise = channel.newProgressivePromise();
+        progressPromise.addListener(new ChannelProgressiveFutureListener() {
+            
+            private volatile long writtenAmount;
+            
+            @Override
+            public void operationComplete(ChannelProgressiveFuture future) throws Exception {
+                if (future.isDone() && future.isSuccess()) {
+                    transportServiceAdapter.sent(writtenAmount);
+                }
+            }
+            
+            @Override
+            public void operationProgressed(ChannelProgressiveFuture future, long progress, long total) throws Exception {
+                writtenAmount = progress;
+            }
+        });
+        
+        final NettyTransportChannel transportChannel = new NettyTransportChannel(transport, action, channel, requestId, version, progressPromise);
         try {
             final TransportRequestHandler handler = transportServiceAdapter.handler(action);
             if (handler == null) {
                 throw new ActionNotFoundTransportException(action);
             }
             final TransportRequest request = handler.newInstance();
-            request.remoteAddress(new InetSocketTransportAddress((InetSocketAddress) channel.getRemoteAddress()));
+            request.remoteAddress(new InetSocketTransportAddress((InetSocketAddress) channel.remoteAddress()));
             request.readFrom(buffer);
             if (handler.executor() == ThreadPool.Names.SAME) {
                 //noinspection unchecked
@@ -229,9 +235,10 @@ public class MessageChannelHandler extends SimpleChannelUpstreamHandler {
         return action;
     }
 
+    
     @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, ExceptionEvent e) throws Exception {
-        transport.exceptionCaught(ctx, e);
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        transport.exceptionCaught(ctx, cause);
     }
 
     class ResponseHandler implements Runnable {

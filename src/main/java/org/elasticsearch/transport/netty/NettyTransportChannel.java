@@ -19,6 +19,10 @@
 
 package org.elasticsearch.transport.netty;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelPromise;
 import org.elasticsearch.Version;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.bytes.ReleasableBytesReference;
@@ -32,9 +36,6 @@ import org.elasticsearch.common.lease.Releasables;
 import org.elasticsearch.common.netty.ReleaseChannelFutureListener;
 import org.elasticsearch.transport.*;
 import org.elasticsearch.transport.support.TransportStatus;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelFuture;
 
 import java.io.IOException;
 import java.io.NotSerializableException;
@@ -49,13 +50,15 @@ public class NettyTransportChannel implements TransportChannel {
     private final String action;
     private final Channel channel;
     private final long requestId;
+    private final ChannelPromise promise;
 
-    public NettyTransportChannel(NettyTransport transport, String action, Channel channel, long requestId, Version version) {
+    public NettyTransportChannel(NettyTransport transport, String action, Channel channel, long requestId, Version version, ChannelPromise promise) {
         this.version = version;
         this.transport = transport;
         this.action = action;
         this.channel = channel;
         this.requestId = requestId;
+        this.promise = promise;
     }
 
     @Override
@@ -92,9 +95,9 @@ public class NettyTransportChannel implements TransportChannel {
             stream.close();
 
             ReleasableBytesReference bytes = bStream.bytes();
-            ChannelBuffer buffer = bytes.toChannelBuffer();
+            ByteBuf buffer = bytes.toByteBuf();
             NettyHeader.writeHeader(buffer, requestId, status, version);
-            ChannelFuture future = channel.write(buffer);
+            ChannelFuture future = channel.writeAndFlush(buffer, promise);
             ReleaseChannelFutureListener listener = new ReleaseChannelFutureListener(bytes);
             future.addListener(listener);
             addedReleaseListener = true;
@@ -110,14 +113,14 @@ public class NettyTransportChannel implements TransportChannel {
         BytesStreamOutput stream = new BytesStreamOutput();
         try {
             stream.skip(NettyHeader.HEADER_SIZE);
-            RemoteTransportException tx = new RemoteTransportException(transport.nodeName(), transport.wrapAddress(channel.getLocalAddress()), action, error);
+            RemoteTransportException tx = new RemoteTransportException(transport.nodeName(), transport.wrapAddress(channel.localAddress()), action, error);
             ThrowableObjectOutputStream too = new ThrowableObjectOutputStream(stream);
             too.writeObject(tx);
             too.close();
         } catch (NotSerializableException e) {
             stream.reset();
             stream.skip(NettyHeader.HEADER_SIZE);
-            RemoteTransportException tx = new RemoteTransportException(transport.nodeName(), transport.wrapAddress(channel.getLocalAddress()), action, new NotSerializableTransportException(error));
+            RemoteTransportException tx = new RemoteTransportException(transport.nodeName(), transport.wrapAddress(channel.localAddress()), action, new NotSerializableTransportException(error));
             ThrowableObjectOutputStream too = new ThrowableObjectOutputStream(stream);
             too.writeObject(tx);
             too.close();
@@ -128,8 +131,8 @@ public class NettyTransportChannel implements TransportChannel {
         status = TransportStatus.setError(status);
 
         BytesReference bytes = stream.bytes();
-        ChannelBuffer buffer = bytes.toChannelBuffer();
+        ByteBuf buffer = bytes.toByteBuf();
         NettyHeader.writeHeader(buffer, requestId, status, version);
-        channel.write(buffer);
+        channel.writeAndFlush(buffer);
     }
 }

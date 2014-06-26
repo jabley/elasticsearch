@@ -19,11 +19,11 @@
 package org.elasticsearch.common.bytes;
 
 import com.google.common.base.Charsets;
+import io.netty.buffer.ByteBuf;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.io.Channels;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.transport.netty.ChannelBufferStreamInputFactory;
-import org.jboss.netty.buffer.ChannelBuffer;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -33,10 +33,10 @@ import java.nio.channels.GatheringByteChannel;
  */
 public class ChannelBufferBytesReference implements BytesReference {
 
-    private final ChannelBuffer buffer;
+    private final ByteBuf buffer;
 
-    public ChannelBufferBytesReference(ChannelBuffer buffer) {
-        this.buffer = buffer;
+    public ChannelBufferBytesReference(ByteBuf buffer) {
+        this.buffer = buffer.retain();
     }
 
     @Override
@@ -90,7 +90,7 @@ public class ChannelBufferBytesReference implements BytesReference {
     }
 
     @Override
-    public ChannelBuffer toChannelBuffer() {
+    public ByteBuf toByteBuf() {
         return buffer.duplicate();
     }
 

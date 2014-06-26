@@ -18,10 +18,10 @@
  */
 package org.elasticsearch.common.bytes;
 
+import io.netty.buffer.ByteBuf;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.util.UnsafeUtils;
-import org.jboss.netty.buffer.ChannelBuffer;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -135,9 +135,9 @@ public interface BytesReference {
     BytesArray copyBytesArray();
 
     /**
-     * Returns the bytes as a channel buffer.
+     * Returns the bytes as a byte buffer.
      */
-    ChannelBuffer toChannelBuffer();
+    ByteBuf toByteBuf();
 
     /**
      * Is there an underlying byte array for this bytes reference.

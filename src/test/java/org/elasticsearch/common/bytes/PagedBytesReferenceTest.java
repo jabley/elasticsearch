@@ -19,6 +19,7 @@
 
 package org.elasticsearch.common.bytes;
 
+import io.netty.buffer.ByteBuf;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.io.Streams;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
@@ -29,7 +30,6 @@ import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.util.ByteArray;
 import org.elasticsearch.test.ElasticsearchTestCase;
 import org.hamcrest.Matchers;
-import org.jboss.netty.buffer.ChannelBuffer;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -39,6 +39,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.util.Arrays;
+
+import static io.netty.util.ReferenceCountUtil.releaseLater;
 
 public class PagedBytesReferenceTest extends ElasticsearchTestCase {
 
@@ -368,7 +370,7 @@ public class PagedBytesReferenceTest extends ElasticsearchTestCase {
     public void testToChannelBuffer() {
         int length = randomIntBetween(10, PAGE_SIZE * randomIntBetween(2, 8));
         BytesReference pbr = getRandomizedPagedBytesReference(length);
-        ChannelBuffer cb = pbr.toChannelBuffer();
+        ByteBuf cb = releaseLater(pbr.toByteBuf());
         assertNotNull(cb);
         byte[] bufferBytes = new byte[length];
         cb.getBytes(0, bufferBytes);
@@ -377,7 +379,7 @@ public class PagedBytesReferenceTest extends ElasticsearchTestCase {
 
     public void testEmptyToChannelBuffer() {
         BytesReference pbr = getRandomizedPagedBytesReference(0);
-        ChannelBuffer cb = pbr.toChannelBuffer();
+        ByteBuf cb = releaseLater(pbr.toByteBuf());
         assertNotNull(cb);
         assertEquals(0, pbr.length());
         assertEquals(0, cb.capacity());
@@ -389,7 +391,7 @@ public class PagedBytesReferenceTest extends ElasticsearchTestCase {
         int sliceOffset = randomIntBetween(0, pbr.length());
         int sliceLength = randomIntBetween(pbr.length() - sliceOffset, pbr.length() - sliceOffset);
         BytesReference slice = pbr.slice(sliceOffset, sliceLength);
-        ChannelBuffer cbSlice = slice.toChannelBuffer();
+        ByteBuf cbSlice = releaseLater(slice.toByteBuf());
         assertNotNull(cbSlice);
         byte[] sliceBufferBytes = new byte[sliceLength];
         cbSlice.getBytes(0, sliceBufferBytes);

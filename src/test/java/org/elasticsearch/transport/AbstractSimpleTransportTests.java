@@ -355,7 +355,7 @@ public abstract class AbstractSimpleTransportTests extends ElasticsearchTestCase
 
         try {
             res.txGet();
-            assertThat("exception should be thrown", false, equalTo(true));
+            fail("exception should be thrown");
         } catch (Exception e) {
             assertThat("bad message !!!", equalTo(e.getCause().getMessage()));
         }

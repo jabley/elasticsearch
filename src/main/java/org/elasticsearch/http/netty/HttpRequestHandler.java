@@ -19,15 +19,17 @@
 
 package org.elasticsearch.http.netty;
 
-import org.jboss.netty.channel.*;
-import org.jboss.netty.handler.codec.http.HttpRequest;
+import io.netty.channel.ChannelHandler;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.handler.codec.http.FullHttpRequest;
 
 
 /**
  *
  */
 @ChannelHandler.Sharable
-public class HttpRequestHandler extends SimpleChannelUpstreamHandler {
+public class HttpRequestHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
 
     private final NettyHttpServerTransport serverTransport;
 
@@ -36,17 +38,15 @@ public class HttpRequestHandler extends SimpleChannelUpstreamHandler {
     }
 
     @Override
-    public void messageReceived(ChannelHandlerContext ctx, MessageEvent e) throws Exception {
-        HttpRequest request = (HttpRequest) e.getMessage();
+    public void channelRead0(ChannelHandlerContext ctx, FullHttpRequest request) throws Exception {
         // the netty HTTP handling always copy over the buffer to its own buffer, either in NioWorker internally
-        // when reading, or using a cumalation buffer
-        NettyHttpRequest httpRequest = new NettyHttpRequest(request, e.getChannel());
-        serverTransport.dispatchRequest(httpRequest, new NettyHttpChannel(serverTransport, e.getChannel(), httpRequest));
-        super.messageReceived(ctx, e);
+        // when reading, or using a cumulation buffer
+        NettyHttpRequest httpRequest = new NettyHttpRequest(request, ctx.channel());
+        serverTransport.dispatchRequest(httpRequest, new NettyHttpChannel(serverTransport, ctx.channel(), httpRequest));
     }
 
     @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, ExceptionEvent e) throws Exception {
-        serverTransport.exceptionCaught(ctx, e);
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        serverTransport.exceptionCaught(ctx, cause);
     }
 }

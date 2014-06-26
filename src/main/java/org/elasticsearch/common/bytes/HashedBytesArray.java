@@ -19,13 +19,13 @@
 package org.elasticsearch.common.bytes;
 
 import com.google.common.base.Charsets;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.ElasticsearchIllegalArgumentException;
 import org.elasticsearch.common.io.Channels;
 import org.elasticsearch.common.io.stream.BytesStreamInput;
 import org.elasticsearch.common.io.stream.StreamInput;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.buffer.ChannelBuffers;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -98,8 +98,8 @@ public class HashedBytesArray implements BytesReference {
     }
 
     @Override
-    public ChannelBuffer toChannelBuffer() {
-        return ChannelBuffers.wrappedBuffer(bytes, 0, bytes.length);
+    public ByteBuf toByteBuf() {
+        return Unpooled.wrappedBuffer(bytes, 0, bytes.length);
     }
 
     @Override

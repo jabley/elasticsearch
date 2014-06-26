@@ -19,27 +19,29 @@
 
 package org.elasticsearch.transport.netty;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.handler.codec.ByteToMessageDecoder;
+import io.netty.handler.codec.TooLongFrameException;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.monitor.jvm.JvmInfo;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
-import org.jboss.netty.handler.codec.frame.FrameDecoder;
-import org.jboss.netty.handler.codec.frame.TooLongFrameException;
 
 import java.io.StreamCorruptedException;
+import java.util.List;
 
 /**
  */
-public class SizeHeaderFrameDecoder extends FrameDecoder {
+public class SizeHeaderFrameDecoder extends ByteToMessageDecoder {
 
     private static final long NINETY_PER_HEAP_SIZE = (long) (JvmInfo.jvmInfo().mem().heapMax().bytes() * 0.9);
 
     @Override
-    protected Object decode(ChannelHandlerContext ctx, Channel channel, ChannelBuffer buffer) throws Exception {
+    protected void decode(ChannelHandlerContext ctx, ByteBuf buffer, List<Object> out) throws Exception {
         if (buffer.readableBytes() < 6) {
-            return null;
+            return;
         }
+
+        buffer.markReaderIndex();
 
         int readerIndex = buffer.readerIndex();
         if (buffer.getByte(readerIndex) != 'E' || buffer.getByte(readerIndex + 1) != 'S') {
@@ -61,10 +63,17 @@ public class SizeHeaderFrameDecoder extends FrameDecoder {
                     "transport content length received [" + new ByteSizeValue(dataLen) + "] exceeded [" + new ByteSizeValue(NINETY_PER_HEAP_SIZE) + "]");
         }
 
-        if (buffer.readableBytes() < dataLen + 6) {
-            return null;
+        int messageSize = dataLen + 6;
+
+        // Make sure there's enough bytes in the buffer
+        if (buffer.readableBytes() < messageSize) {
+            // Reset to the marked position to read the length field again next time.
+            buffer.resetReaderIndex();
+            return;
         }
-        buffer.skipBytes(6);
-        return buffer;
+
+        ByteBuf message = buffer.readSlice(messageSize).retain();
+        message.skipBytes(2); // Skip the first byte 'E' and the second byte 'S'
+        out.add(message);
     }
 }

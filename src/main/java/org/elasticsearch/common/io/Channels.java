@@ -19,7 +19,7 @@
 
 package org.elasticsearch.common.io;
 
-import org.jboss.netty.buffer.ChannelBuffer;
+import io.netty.buffer.ByteBuf;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -151,7 +151,7 @@ public final class Channels {
      * @param channel     target GatheringByteChannel
      * @throws IOException
      */
-    public static void writeToChannel(ChannelBuffer source, int sourceIndex, int length, GatheringByteChannel channel) throws IOException {
+    public static void writeToChannel(ByteBuf source, int sourceIndex, int length, GatheringByteChannel channel) throws IOException {
         while (length > 0) {
             int written = source.getBytes(sourceIndex, channel, length);
             sourceIndex += written;

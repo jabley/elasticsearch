@@ -18,20 +18,20 @@
  */
 package org.elasticsearch.common.netty;
 
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelHandlerContext;
-import org.jboss.netty.handler.codec.frame.FrameDecoder;
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.handler.codec.ByteToMessageDecoder;
+
+import java.util.List;
 
 /**
  * A marker to not remove frame decoder from the resulting jar so plugins can use it.
  */
-public class KeepFrameDecoder extends FrameDecoder {
+public class KeepFrameDecoder extends ByteToMessageDecoder {
 
     public static final KeepFrameDecoder decoder = new KeepFrameDecoder();
 
     @Override
-    protected Object decode(ChannelHandlerContext ctx, Channel channel, ChannelBuffer buffer) throws Exception {
-        return null;
+    protected void decode(ChannelHandlerContext ctx, ByteBuf buffer, List<Object> out) throws Exception {
     }
 }

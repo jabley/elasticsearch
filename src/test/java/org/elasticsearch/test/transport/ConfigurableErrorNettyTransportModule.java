@@ -18,6 +18,9 @@
  */
 package org.elasticsearch.test.transport;
 
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandler;
+import io.netty.channel.ChannelPipeline;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.Version;
 import org.elasticsearch.common.component.Lifecycle;
@@ -38,9 +41,6 @@ import org.elasticsearch.transport.TransportRequestHandler;
 import org.elasticsearch.transport.netty.MessageChannelHandler;
 import org.elasticsearch.transport.netty.NettyTransport;
 import org.elasticsearch.transport.netty.NettyTransportChannel;
-import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelPipeline;
-import org.jboss.netty.channel.ChannelPipelineFactory;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -65,35 +65,37 @@ public class ConfigurableErrorNettyTransportModule extends AbstractModule {
         }
 
         @Override
-        public ChannelPipelineFactory configureServerChannelPipelineFactory() {
-            return new ErrorPipelineFactory(this);
+        public ChannelHandler configureServerChannelHandler() {
+            return new ErrorChannelHandler(this);
         }
 
-        private static class ErrorPipelineFactory extends ServerChannelPipeFactory {
+        private static class ErrorChannelHandler extends ServerChannelHandler {
 
             private final ESLogger logger;
 
-            public ErrorPipelineFactory(ExceptionThrowingNettyTransport exceptionThrowingNettyTransport) {
+            public ErrorChannelHandler(ExceptionThrowingNettyTransport exceptionThrowingNettyTransport) {
                 super(exceptionThrowingNettyTransport);
                 this.logger = exceptionThrowingNettyTransport.logger;
             }
 
-            public ChannelPipeline getPipeline() throws Exception {
-                ChannelPipeline pipeline = super.getPipeline();
+            @Override
+            protected void initChannel(Channel ch) throws Exception {
+                super.initChannel(ch);
+                ChannelPipeline pipeline = ch.pipeline();
                 pipeline.replace("dispatcher", "dispatcher", new MessageChannelHandler(nettyTransport, logger) {
 
                     @Override
                     protected String handleRequest(Channel channel, StreamInput buffer, long requestId, Version version) throws IOException {
                         final String action = buffer.readString();
 
-                        final NettyTransportChannel transportChannel = new NettyTransportChannel(transport, action, channel, requestId, version);
+                        final NettyTransportChannel transportChannel = new NettyTransportChannel(transport, action, channel, requestId, version, channel.newProgressivePromise());
                         try {
                             final TransportRequestHandler handler = transportServiceAdapter.handler(action);
                             if (handler == null) {
                                 throw new ActionNotFoundTransportException(action);
                             }
                             final TransportRequest request = handler.newInstance();
-                            request.remoteAddress(new InetSocketTransportAddress((InetSocketAddress) channel.getRemoteAddress()));
+                            request.remoteAddress(new InetSocketTransportAddress((InetSocketAddress) channel.remoteAddress()));
                             request.readFrom(buffer);
                             if (request.getHeaders() != null && request.getHeaders().containsKey("ERROR")) {
                                 throw new ElasticsearchException((String) request.getHeaders().get("ERROR"));
@@ -152,7 +154,6 @@ public class ConfigurableErrorNettyTransportModule extends AbstractModule {
                         }
                     }
                 });
-                return pipeline;
             }
         }
     }
