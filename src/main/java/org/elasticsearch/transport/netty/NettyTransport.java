@@ -24,6 +24,7 @@ import com.google.common.collect.Lists;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -293,6 +294,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
         }
         clientBootstrap.option(ChannelOption.WRITE_BUFFER_HIGH_WATER_MARK, 32 * 1024)
                         .option(ChannelOption.WRITE_BUFFER_LOW_WATER_MARK, 8 * 1024);
+        clientBootstrap.option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT);
 
         if (!settings.getAsBoolean("network.server", true)) {
             return;
@@ -333,6 +335,7 @@ public class NettyTransport extends AbstractLifecycleComponent<Transport> implem
         }
         serverBootstrap.childOption(ChannelOption.WRITE_BUFFER_HIGH_WATER_MARK, 32 * 1024)
                         .childOption(ChannelOption.WRITE_BUFFER_LOW_WATER_MARK, 8 * 1024);
+        serverBootstrap.childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT);
 
         // Bind and start to accept incoming connections.
         InetAddress hostAddressX;

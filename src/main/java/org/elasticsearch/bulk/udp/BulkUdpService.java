@@ -21,6 +21,7 @@ package org.elasticsearch.bulk.udp;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
@@ -114,6 +115,7 @@ public class BulkUdpService extends AbstractLifecycleComponent<BulkUdpService> {
                     .option(ChannelOption.SO_BROADCAST, true)
                     .option(ChannelOption.WRITE_BUFFER_HIGH_WATER_MARK, 32 * 1024)
                     .option(ChannelOption.WRITE_BUFFER_LOW_WATER_MARK, 8 * 1024)
+                    .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                     .handler(new ChannelInitializer<Channel>() {
                         @Override
                         protected void initChannel(Channel channel) throws Exception {
