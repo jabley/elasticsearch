@@ -218,6 +218,8 @@ public class NettyHttpServerTransport extends AbstractLifecycleComponent<HttpSer
             serverBootstrap.option(ChannelOption.SO_REUSEADDR, reuseAddress);
             serverBootstrap.childOption(ChannelOption.SO_REUSEADDR, reuseAddress);
         }
+        serverBootstrap.childOption(ChannelOption.WRITE_BUFFER_HIGH_WATER_MARK, 32 * 1024)
+                        .childOption(ChannelOption.WRITE_BUFFER_LOW_WATER_MARK, 8 * 1024);
 
         // Bind and start to accept incoming connections.
         InetAddress hostAddressX;

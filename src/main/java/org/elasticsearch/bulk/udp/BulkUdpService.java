@@ -112,6 +112,8 @@ public class BulkUdpService extends AbstractLifecycleComponent<BulkUdpService> {
                     .group(workerGroup)
                     .option(ChannelOption.RCVBUF_ALLOCATOR, receiveBufferSizePredictorFactory)
                     .option(ChannelOption.SO_BROADCAST, true)
+                    .option(ChannelOption.WRITE_BUFFER_HIGH_WATER_MARK, 32 * 1024)
+                    .option(ChannelOption.WRITE_BUFFER_LOW_WATER_MARK, 8 * 1024)
                     .handler(new ChannelInitializer<Channel>() {
                         @Override
                         protected void initChannel(Channel channel) throws Exception {
